@@ -1,3 +1,7 @@
+// aws + terraform  
+
+
+ //here we goes with the code
 provider "aws" {
 
 region = "ap-south-1"
@@ -6,30 +10,44 @@ profile = "vik_iam1"
 
 }
 
-variable "x" {
+resource "tls_private_key" "mykey" {
 
-type =string
-default = "hello this is IAS service using terraform pls enter key to proceed"
-}
-output "autobot" {
-value = "${var.x}"
+  algorithm = "RSA"
+
 }
 
-//creating key
-variable "enter_key_name" {
- type = string
+resource "aws_key_pair" "generated_key" {
+
+  key_name   = "mykey"
+
+  public_key = "${tls_private_key.mykey.public_key_openssh}"
+
+  depends_on = [
+
+    tls_private_key.mykey
+
+  ]
+
 }
 
-//ceating ec2 instance
+resource "local_file" "key-file" {
 
-resource "aws_instance" "ec2-terraform" {
-  ami           = "ami-005956c5f0f757d37"
-  instance_type = "t2.micro"
-  key_name     = var.enter_key_name
-security_groups = ["${aws_security_group.sg.name}"]
-  tags = {
-    Name = "hmc-os1"
-  }
+  content  = "${tls_private_key.mykey.private_key_pem}"
+
+  filename = "mykey.pem"
+
+  depends_on = [
+
+    tls_private_key.mykey
+
+  ]
+
+}
+
+//creating vpc
+
+variable "vpc" {
+   type = string
 }
 
 //creating security group
@@ -39,7 +57,7 @@ security_groups = ["${aws_security_group.sg.name}"]
 resource "aws_security_group" "sg" {
   name        = "SGservice"
   description = "this is security group for ec2 instance"
-  vpc_id      = "vpc-da928fb2"
+  vpc_id      = "${var.vpc}"
 
   ingress {
     description = "http from VPC"
@@ -76,6 +94,39 @@ ingress {
   }
 }
 
+//ceating ec2 instance
+
+resource "aws_instance" "ec2-terraform" {
+
+depends_on = [
+    aws_security_group.sg,
+  ]
+  ami           = "ami-005956c5f0f757d37"
+  instance_type = "t2.micro"
+  key_name     = aws_key_pair.generated_key.key_name
+security_groups = ["${aws_security_group.sg.name}"]
+
+connection {
+    type     = "ssh"
+    user     = "ec2-user"
+    private_key ="${tls_private_key.mykey.private_key_pem}"
+    host     = aws_instance.ec2-terraform.public_ip
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "sudo yum install httpd  php git -y",
+      "sudo service httpd enable",
+      "sudo service  httpd restart ",
+    ]
+  }
+
+  tags = {
+    Name = "hmc-os1"
+  }
+
+}
+
 output  "my_ec2_public_ip" {
 	value = aws_instance.ec2-terraform.public_ip
 }
@@ -96,6 +147,10 @@ output "avzone" {
 
 resource "aws_ebs_volume" "esbv1" {
   
+depends_on = [
+    aws_instance.ec2-terraform,
+  ]
+
   availability_zone = aws_instance.ec2-terraform.availability_zone
   size              = 1
   tags = {
@@ -115,15 +170,26 @@ output "aws_instance_id" {
 //attaching ebs volume
 
 resource "aws_volume_attachment" "ebs_vol_attached" {
-  device_name = "/dev/xvdf"
+  
+depends_on = [
+    aws_ebs_volume.esbv1,
+  ]
+
+  device_name = "/dev/sdh"
   volume_id   = aws_ebs_volume.esbv1.id
   instance_id = aws_instance.ec2-terraform.id
+  force_detach = true
 }
 
 
 // creating s3 bucket
 
 resource "aws_s3_bucket" "bucket" {
+
+depends_on = [
+    aws_volume_attachment.ebs_vol_attached,
+  ]
+
   bucket = "bucket-hmc-task1"
   acl    = "private"
 
@@ -136,6 +202,11 @@ resource "aws_s3_bucket" "bucket" {
 //allowing public access or block public access == false
 
 resource "aws_s3_bucket_public_access_block" "allow" {
+
+depends_on = [
+    aws_s3_bucket.bucket,
+  ]
+
   bucket = aws_s3_bucket.bucket.id
 
   block_public_acls   = false
@@ -145,10 +216,16 @@ resource "aws_s3_bucket_public_access_block" "allow" {
 //Uploading a file to a bucket
 
 resource "aws_s3_bucket_object" "object" {
-
+depends_on = [
+    aws_s3_bucket_public_access_block.allow,
+  ]
   bucket = aws_s3_bucket.bucket.bucket
-  key    = "avengers"
-  source = "avengers.jpg" 
+  key    = "aws-terra.png"
+  source = "aws-terra.png" 
+  acl =   "public-read"
+
+  etag = "${filemd5("C:/Users/HP/Desktop/terra-docs/hmc-task1/aws-terra.png")}"
+
 // source :give file name and its path
 
 }
@@ -159,28 +236,30 @@ locals {
   s3_origin_id = "myS3Origin-Cloudfront"
 }
 
-//creating cloud front with s3 as origin
+
 
 // creating origin access identity
 
-variable "OAI" {
- 
-type = string
-
-}
-
 resource "aws_cloudfront_origin_access_identity" "origin_access_identity" {
-  comment = "${var.OAI}"
+
+  comment = "Some comment"
 }
-resource "aws_cloudfront_distribution" "s3_distribution" {
+
+//creating cloud front with s3 as origin
+
+resource "aws_cloudfront_distribution"  "s3_distribution" {
+  
+depends_on=[
+
+ aws_s3_bucket_object.object,
+ null_resource.nullremote1,
+
+]
   origin {
     domain_name = aws_s3_bucket.bucket.bucket_regional_domain_name
     origin_id   = local.s3_origin_id
-
-    s3_origin_config {
-      origin_access_identity = "${aws_cloudfront_origin_access_identity.origin_access_identity.cloudfront_access_identity_path}"
-    }
   }
+
   enabled             = true
   is_ipv6_enabled     = true
   comment             = "Some comment"
@@ -238,8 +317,7 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
    
    restrictions {
     geo_restriction {
-      restriction_type = "whitelist"
-      locations        = ["IN","US", "CA", "GB", "DE"]
+      restriction_type = "none"
     }
   }
 
@@ -250,15 +328,32 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
   viewer_certificate {
     cloudfront_default_certificate = true
   }
+    connection {
+    type     = "ssh"
+    user     = "ec2-user"
+    private_key ="${tls_private_key.mykey.private_key_pem}"
+    host     = aws_instance.ec2-terraform.public_ip
+  }
+
+provisioner "remote-exec" {
+    inline = [ 
+       " sudo su << EOF ",
+      " sudo echo \"<img src ='http://${self.domain_name}/${aws_s3_bucket_object.object.key}'  height='400' width='400'>\" >> /var/www/html/mywebpage.html",
+       "EOF"
+    ]
+  }
 }
 
-
-// updating bucket policy for accessing buckets objects
-
+//updating bucket policy
 
 data "aws_iam_policy_document" "s3_policy" {
+
+depends_on=[
+aws_cloudfront_distribution.s3_distribution,
+]
   statement {
     actions   = ["s3:GetObject"]
+
     resources = ["${aws_s3_bucket.bucket.arn}/*"]
 
     principals {
@@ -279,6 +374,9 @@ data "aws_iam_policy_document" "s3_policy" {
 }
 
 resource "aws_s3_bucket_policy" "example" {
+  depends_on=[
+aws_cloudfront_distribution.s3_distribution,
+]
   bucket = "${aws_s3_bucket.bucket.id}"
   policy = "${data.aws_iam_policy_document.s3_policy.json}"
 }
@@ -286,20 +384,67 @@ resource "aws_s3_bucket_policy" "example" {
 
 //creating snapshot of ebs attached for backup
 
-
-resource "aws_ebs_volume" "example" {
-  availability_zone = "us-west-2a"
-  size              = 40
-
-  tags = {
-    Name = "HelloWorld"
-  }
-}
-
 resource "aws_ebs_snapshot" "ebs_snapshot" {
+
+depends_on = [
+    null_resource.nullremote1,
+  ]
   volume_id = "${aws_ebs_volume.esbv1.id}"
 
   tags = {
     Name = "web-server-snap1"
   }
 }
+resource "null_resource" "nullremote1"  {
+
+depends_on = [
+     aws_volume_attachment.ebs_vol_attached,
+  ]
+
+  connection {
+    type     = "ssh"
+    user     = "ec2-user"
+    private_key = "${tls_private_key.mykey.private_key_pem}"
+    host     = aws_instance.ec2-terraform.public_ip
+  }
+
+provisioner "remote-exec" {
+    inline = [
+      "sudo mkfs.ext4  /dev/xvdh",
+      "sudo mount  /dev/xvdh /var/www/html",
+      "sudo rm -rf /var/www/html/*",
+      "sudo git clone https://github.com/VikashTiwari1208/hmc-task1.git  /var/www/html/"
+    ]
+  }
+}
+
+resource "null_resource" "remote2"{
+depends_on= [
+aws_cloudfront_distribution.s3_distribution,
+]
+connection {
+    type     = "ssh"
+    user     = "ec2-user"
+    private_key = "${tls_private_key.mykey.private_key_pem}"
+    host     = aws_instance.ec2-terraform.public_ip
+   }
+provisioner "remote-exec" {
+   
+  inline = ["sudo service httpd start"]
+   }
+}
+resource "null_resource" "localexec"  {
+
+depends_on = [
+  aws_cloudfront_distribution.s3_distribution,
+  null_resource.remote2,
+]
+
+
+provisioner "local-exec" {
+   
+     command="start chrome  ${aws_instance.ec2-terraform.public_ip}/mywebpage.html"
+  }
+
+}
+
